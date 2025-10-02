@@ -1,0 +1,14 @@
+body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#f8f9fa;margin:0;padding:0}
+.container{max-width:720px;margin:40px auto;background:#fff;border-radius:16px;box-shadow:0 6px 18px rgba(0,0,0,.06);padding:24px}
+h1{margin:0 0 16px 0}
+#qrbox{display:flex;justify-content:center;align-items:center;border:1px solid #eee;border-radius:12px;height:360px;background:#fafafa}
+#qrimg{max-width:320px;max-height:320px}
+#timer{margin-top:12px;text-align:center;font-size:18px}
+form{display:flex;gap:8px}
+input[type=text]{flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:16px}
+button{padding:10px 16px;border:0;background:#2d6cdf;color:#fff;border-radius:8px;font-size:16px;cursor:pointer}
+button:hover{background:#1f56bd}
+.row{display:grid;grid-template-columns:1fr;gap:24px}
+table{width:100%;border-collapse:collapse}
+th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
+@media(min-width:900px){.row{grid-template-columns:1fr 1fr}}

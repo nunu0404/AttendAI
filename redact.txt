@@ -1,0 +1,5 @@
+﻿regex:ya29\.[-A-Za-z0-9\._]+==>REDACTED_TOKEN
+regex:1\/\/[-A-Za-z0-9\._-]+==>REDACTED_REFRESH
+regex:"access_token"\s*:\s*"[^"]+"==>"access_token":"REDACTED"
+regex:"refresh_token"\s*:\s*"[^"]+"==>"refresh_token":"REDACTED"
+regex:"client_secret"\s*:\s*"[^"]+"==>"client_secret":"REDACTED"

@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AttendAI Check-in</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="container">
+<h1>출석 체크</h1>
+<form id="f">
+<input type="text" id="student_id" placeholder="학번" required>
+<input type="hidden" id="session_id">
+<input type="hidden" id="token">
+<button type="submit">출석</button>
+</form>
+<div id="msg"></div>
+</div>
+<script src="/static/checkin.js"></script>
+</body>
+</html>

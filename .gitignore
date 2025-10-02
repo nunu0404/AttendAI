@@ -1,0 +1,17 @@
+﻿__pycache__/
+*.pyc
+.venv/
+.env
+
+backend/credentials.json
+backend/gmail_token.json
+backend/attendai.db
+backend/attachments/
+backend/emails/
+
+.vscode/
+.DS_Store
+Thumbs.db
+
+node_modules/
+dist/
