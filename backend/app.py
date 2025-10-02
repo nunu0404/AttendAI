@@ -5,7 +5,7 @@ import secrets
 import io
 import base64
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import qrcode
@@ -200,6 +200,18 @@ async def api_export_excuses_csv(session_id: int):
     data = buf.getvalue()
     return Response(content=data, media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="excuses_{session_id}.csv"'})
 
+@app.post("/api/session/start")
+async def api_session_start(hours: int = Body(2)):
+    conn = db()
+    cur = conn.cursor()
+    start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    end = (datetime.now() + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute("INSERT INTO sessions(class_id, start_time, end_time) VALUES(?,?,?)",
+                ("CLS101", start, end))
+    conn.commit()
+    sid = cur.lastrowid
+    conn.close()
+    return {"session_id": sid, "start_time": start, "end_time": end}
 
 @app.get("/api/attendance/session/{session_id}/list")
 async def api_attendance_list(session_id: int):
@@ -352,9 +364,18 @@ async def api_current_session():
 async def api_qr_current(session_id: int = None, request: Request = None):
     sid = session_id or current_session_id()
     if not sid:
-        raise HTTPException(status_code=404, detail="no active session")
+        # 없으면 자동으로 새 세션 시작
+        conn = db(); cur = conn.cursor()
+        start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        end = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("INSERT INTO sessions(class_id, start_time, end_time) VALUES(?,?,?)",
+                    ("CLS101", start, end))
+        conn.commit()
+        sid = cur.lastrowid
+        conn.close()
     t, ga, vu = get_or_rotate_token(sid)
     return {"session_id": sid, "token": t, "generated_at": ga, "valid_until": vu}
+
 
 @app.get("/api/qr/image")
 async def api_qr_image(session_id: int = None, request: Request = None):
