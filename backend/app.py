@@ -138,9 +138,13 @@ async def api_gmail_ingest(query: str = None, days: int = 14):
     spec = importlib.util.spec_from_file_location("gmail_ingest", p)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    q = query or '(subject:공결 OR 공결 OR 진단서 OR 참가확인서)'
+
+    # None 인 경우만 기본 쿼리 적용. ''(빈 문자열)은 "전체"로 해석.
+    default_q = '(subject:공결 OR 공결 OR 진단서 OR 참가확인서)'
+    q = default_q if (query is None) else query
+
     mod.run(q, days)
-    return {"ok": True}
+    return {"ok": True, "query": q, "days": days}
 
 @app.get("/api/sessions")
 async def api_sessions(limit: int = 20):
