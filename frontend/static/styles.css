@@ -12,3 +12,87 @@ button:hover{background:#1f56bd}
 table{width:100%;border-collapse:collapse}
 th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
 @media(min-width:900px){.row{grid-template-columns:1fr 1fr}}
+
+/* 공결 표 가독성 */
+#excuses table { table-layout: fixed; width: 100%; border-collapse: collapse; }
+#excuses th, #excuses td { padding: 6px 8px; vertical-align: top; }
+
+/* 열 너비: 학번/사유/증빙 고정, 비고는 가변 */
+#excuses th:nth-child(1), #excuses td:nth-child(1) { width: 120px; }
+#excuses th:nth-child(2), #excuses td:nth-child(2) { width: 80px; }
+#excuses th:nth-child(3), #excuses td:nth-child(3) { width: 80px; }
+
+/* 긴 텍스트 줄바꿈: 글자 단위 강제깨기 금지, URL은 적당히 줄바꿈 */
+#excuses td:nth-child(4) {
+  white-space: normal;
+  word-break: break-word;   /* 단어 경계 우선 줄바꿈 */
+  overflow-wrap: anywhere;  /* URL 등 긴 토큰도 줄바꿈 허용 */
+  line-height: 1.35;
+}
+
+/* 표 전체가 넘치면 가로 스크롤로 보호 */
+.section-table { overflow-x: auto; }
+
+/* 페이지 넓게 */
+body { max-width: 1280px; margin: 0 auto; padding: 0 16px; }
+
+/* 공결 표 */
+#excuses { overflow-x: auto; }                 /* 넘치면 가로 스크롤 */
+#excuses table { table-layout: auto; width: 100%; border-collapse: collapse; }
+#excuses th, #excuses td { padding: 6px 8px; vertical-align: top; }
+#excuses th:nth-child(1), #excuses td:nth-child(1) { width: 140px; }
+#excuses th:nth-child(2), #excuses td:nth-child(2) { width: 90px;  }
+#excuses th:nth-child(3), #excuses td:nth-child(3) { width: 90px;  }
+#excuses th:nth-child(4), #excuses td:nth-child(4) { min-width: 420px; }
+
+/* 비고 칸: 자연스러운 줄바꿈, 글자 단위 강제깨기 금지 */
+#excuses td:nth-child(4) {
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: anywhere;     /* URL은 적당히 줄바꿈 */
+  line-height: 1.4;
+}
+
+/* 줄 제한 + 더보기/접기 */
+.note-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;   /* 첫 화면에서 3줄만 */
+  overflow: hidden;
+}
+.more-link {
+  margin-left: 8px;
+  font-size: 0.92rem;
+  color: #3b82f6;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+/* 공결 섹션 완전 숨김 */
+#excuses { display: none !important; }
+/* 혹시 공결 표를 감싼 컨테이너가 있으면 같이 숨김 (있어도/없어도 안전) */
+.excuses-section { display: none !important; }
+
+/* QR 대체 모달 */
+.qr-modal.hidden { display: none; }
+.qr-modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+}
+.qr-modal .qr-box {
+  width: min(520px, 95vw); height: min(740px, 95vh);
+  background: #fff; border-radius: 10px; overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  display: flex; flex-direction: column;
+}
+.qr-modal .qr-head {
+  height: 44px; display:flex; align-items:center; justify-content:space-between;
+  padding: 0 12px; background: #0f172a; color: #fff;
+}
+.qr-modal #qrFallbackFrame { flex: 1; width: 100%; border: 0; }
+.qr-modal #qrFallbackClose {
+  background: transparent; color: #fff; border: 0; font-size: 20px; cursor: pointer;
+}

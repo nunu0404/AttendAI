@@ -8,9 +8,12 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi import Body
+from fastapi.responses import JSONResponse
 import qrcode
 from fastapi import Response
 import csv, io
+
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "../frontend/static")), name="static")
@@ -101,6 +104,19 @@ async def api_anomaly(session_id: int):
         out.append({"student_id": s, "score": scores[s], "flags": flags})
     return {"session_id": session_id, "results": out}
 
+@app.post("/api/session/create_for_date")
+async def api_session_create_for_date(date: str = Body(...), hours: int = Body(2)):
+    # 하루 세션(00:00~23:59)로 만들면 조회 편함
+    start = f"{date} 00:00:00"
+    end   = f"{date} 23:59:59"
+    conn = db(); cur = conn.cursor()
+    cur.execute("INSERT INTO sessions(class_id,start_time,end_time) VALUES(?,?,?)",
+                ("CLS101", start, end))
+    conn.commit()
+    sid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "session_id": sid}
+
 @app.get("/api/excuses/session/{session_id}")
 async def api_excuses_session(session_id: int):
     conn = db()
@@ -131,20 +147,121 @@ async def api_excuses_session(session_id: int):
         ]
     }
 
+
 @app.post("/api/excuses/gmail/ingest")
-async def api_gmail_ingest(query: str = None, days: int = 14):
-    import importlib.util, os
-    p = os.path.join(os.path.dirname(__file__), "gmail_ingest.py")
-    spec = importlib.util.spec_from_file_location("gmail_ingest", p)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+async def api_gmail_ingest(query: str = None, days: int = 30):
+    import importlib.util, os, traceback
+    try:
+        p = os.path.join(os.path.dirname(__file__), "gmail_ingest.py")
+        spec = importlib.util.spec_from_file_location("gmail_ingest", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
 
-    # None 인 경우만 기본 쿼리 적용. ''(빈 문자열)은 "전체"로 해석.
-    default_q = '(subject:공결 OR 공결 OR 진단서 OR 참가확인서)'
-    q = default_q if (query is None) else query
+        # query가 None일 때만 기본 키워드 사용. 빈 문자열("")은 "전체 검색".
+        default_q = '(subject:공결 OR 공결 OR 진단서 OR 참가확인서)'
+        q = default_q if (query is None) else query
 
-    mod.run(q, days)
-    return {"ok": True, "query": q, "days": days}
+        result = mod.run(q, days)
+
+        found = upserted = sid_missing = 0
+        if isinstance(result, tuple):
+            if len(result) >= 1: found = result[0] or 0
+            if len(result) >= 2: upserted = result[1] or 0
+            if len(result) >= 3: sid_missing = result[2] or 0
+        elif isinstance(result, int):
+            # 예전 버전이 count만 반환하는 경우
+            upserted = result
+        else:
+            # 혹시 dict나 다른 형태여도 죽지 않게 기본값 유지
+            pass
+
+        return {
+            "ok": True,
+            "query": q,
+            "days": days,
+            "found": found,
+            "upserted": upserted,
+            "sid_missing": sid_missing
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(e), "trace": traceback.format_exc()},
+        )
+
+@app.get("/api/export/attendance/recent.csv")
+async def api_export_attendance_recent(days: int = 14):
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = db(); cur = conn.cursor()
+    cur.execute("""
+        SELECT session_id, student_id, checked_at, ip, device_name, token, qr_generated_at, anomaly_flags
+        FROM attendance_logs
+        WHERE date(checked_at) >= ?
+        ORDER BY session_id ASC, id ASC
+    """, (cutoff,))
+    rows = cur.fetchall()
+    conn.close()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["session_id","student_id","checked_at","ip","device_name","token","qr_generated_at","anomaly_flags"])
+    for r in rows:
+        w.writerow([r["session_id"], r["student_id"], r["checked_at"], r["ip"] or "", r["device_name"] or "", r["token"] or "", r["qr_generated_at"] or "", r["anomaly_flags"] or ""])
+    data = buf.getvalue()
+    return Response(content=data, media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="attendance_recent_{days}d.csv"'})
+
+@app.get("/api/export/excuses/recent.csv")
+async def api_export_excuses_recent(days: int = 14, enc: str = "cp949"):
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = db(); cur = conn.cursor()
+    cur.execute("""
+        SELECT student_id, session_date, excuse_type, evidence_ok, notes
+        FROM email_excuses
+        WHERE session_date >= ?
+        ORDER BY session_date ASC, id ASC
+    """, (cutoff,))
+    rows = cur.fetchall(); conn.close()
+
+    data = _csv_bytes(
+        rows=[ [r["session_date"], r["student_id"], r["excuse_type"], int(r["evidence_ok"] or 0), _sanitize_notes(r["notes"]) ] for r in rows ],
+        header=["session_date","student_id","excuse_type","evidence_ok","notes"],
+        encoding=enc
+    )
+    return Response(
+        content=data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="excuses_recent_{days}d.csv"'}
+    )
+    
+@app.get("/api/attendance/recent")
+async def api_attendance_recent(days: int = 14, limit: int = 50):
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = db(); cur = conn.cursor()
+    cur.execute("""
+        SELECT session_id, student_id, checked_at, device_name, ip
+        FROM attendance_logs
+        WHERE date(checked_at) >= ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (cutoff, limit))
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return {"logs": rows}
+
+@app.get("/api/excuses/recent")
+async def api_excuses_recent(days: int = 14, limit: int = 200):
+    cutoff = (datetime.now() - timedelta(days=days)).date().isoformat()
+    conn = db(); cur = conn.cursor()
+    cur.execute("""
+        SELECT id, student_id, session_date, excuse_type, evidence_ok, notes
+        FROM email_excuses
+        WHERE session_date >= ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (cutoff, limit))
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return {"rows": rows}
 
 @app.get("/api/sessions")
 async def api_sessions(limit: int = 20):
@@ -184,25 +301,33 @@ async def api_export_attendance_csv(session_id: int):
     return Response(content=data, media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="attendance_{session_id}.csv"'})
 
 @app.get("/api/export/session/{session_id}/excuses.csv")
-async def api_export_excuses_csv(session_id: int):
-    conn = db()
-    cur = conn.cursor()
+async def api_export_excuses_csv(session_id: int, enc: str = "cp949"):
+    conn = db(); cur = conn.cursor()
     cur.execute("SELECT start_time FROM sessions WHERE id=?", (session_id,))
     srow = cur.fetchone()
     if not srow:
         conn.close()
         raise HTTPException(status_code=404, detail="no session")
     d = srow["start_time"][:10]
-    cur.execute("SELECT student_id, excuse_type, evidence_ok, notes FROM email_excuses WHERE session_date=? ORDER BY id ASC", (d,))
-    rows = cur.fetchall()
-    conn.close()
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["session_date","student_id","excuse_type","evidence_ok","notes"])
-    for r in rows:
-        w.writerow([d, r["student_id"], r["excuse_type"], int(r["evidence_ok"]), r["notes"] or ""])
-    data = buf.getvalue()
-    return Response(content=data, media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="excuses_{session_id}.csv"'})
+    cur.execute("""
+        SELECT student_id, excuse_type, evidence_ok, notes
+        FROM email_excuses
+        WHERE session_date=?
+        ORDER BY id ASC
+    """, (d,))
+    rows = cur.fetchall(); conn.close()
+
+    data = _csv_bytes(
+        rows=[ [d, r["student_id"], r["excuse_type"], int(r["evidence_ok"] or 0), _sanitize_notes(r["notes"]) ] for r in rows ],
+        header=["session_date","student_id","excuse_type","evidence_ok","notes"],
+        encoding=enc
+    )
+    return Response(
+        content=data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="excuses_{session_id}.csv"'}
+    )
+
 
 @app.post("/api/session/start")
 async def api_session_start(hours: int = Body(2)):
@@ -267,6 +392,9 @@ def migrate_db():
         pass
     try:
         cur.execute("ALTER TABLE email_excuses ADD COLUMN msg_id TEXT")
+        cur.execute("ALTER TABLE email_excuses ADD COLUMN ai_label TEXT")
+        cur.execute("ALTER TABLE email_excuses ADD COLUMN ai_confidence REAL")
+        cur.execute("ALTER TABLE email_excuses ADD COLUMN ai_reason TEXT")
         conn.commit()
     except Exception:
         pass
@@ -275,8 +403,41 @@ def migrate_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS excused_attendance(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER,
+          student_id TEXT,
+          excuse_type TEXT,
+          evidence_ok INTEGER,
+          notes TEXT,
+          source TEXT,
+          created_at TEXT,
+          UNIQUE(session_id, student_id)
+        )
+        """)
+        conn.commit()
+    
+    except Exception:
+        pass
     conn.close()
 
+
+def _sanitize_notes(s: str) -> str:
+    return (s or "").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+def _csv_bytes(rows, header, *, encoding="cp949"):
+    buf = io.StringIO(newline="")
+    w = csv.writer(buf, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
+    w.writerow(header)
+    for row in rows:
+        w.writerow(row)
+    text = buf.getvalue()
+    if encoding.lower() == "utf-8":
+        return ("\ufeff" + text).encode("utf-8")  # UTF-8 BOM
+    # CP949: 한셀/엑셀 호환, 인코딩 불가 문자는 치환
+    return text.encode("cp949", errors="replace")
 
 def current_session_id():
     conn = db()
@@ -336,6 +497,46 @@ def client_ip(request: Request):
     if xf:
         return xf.split(",")[0].strip()
     return request.client.host
+
+def apply_excuses(session_id: int) -> int:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT start_time FROM sessions WHERE id=?", (session_id,))
+    srow = cur.fetchone()
+    if not srow:
+        conn.close()
+        return 0
+    d = srow["start_time"][:10]
+    cur.execute("SELECT student_id, excuse_type, evidence_ok, ai_label, ai_confidence, ai_reason, notes FROM email_excuses WHERE session_date=?", (d,))
+    rows = cur.fetchall()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    n = 0
+    for r in rows:
+        # AI가 공결/병결이고 증빙 적합(evidence_ok=1)일 때만 인정(정책은 필요시 조정)
+        if (r["excuse_type"] in ("공결","병결")) and int(r["evidence_ok"] or 0) == 1:
+            cur.execute("""
+              INSERT INTO excused_attendance(session_id, student_id, excuse_type, evidence_ok, notes, source, created_at)
+              VALUES(?,?,?,?,?,?,?)
+              ON CONFLICT(session_id, student_id) DO UPDATE SET
+                excuse_type=excluded.excuse_type,
+                evidence_ok=excluded.evidence_ok,
+                notes=excluded.notes
+            """, (session_id, r["student_id"], r["excuse_type"], 1,
+                  (r["notes"] or "")[:200],
+                  f"gmail+gemini({(r['ai_label'] or '')}/{(r['ai_confidence'] or 0)})", now))
+            n += 1
+    conn.commit()
+    conn.close()
+    return n
+
+@app.post("/api/excuses/apply")
+async def api_excuses_apply(data: dict):
+    sid = int(data.get("session_id", 0)) or current_session_id()
+    if not sid:
+        raise HTTPException(status_code=400, detail="no session")
+    n = apply_excuses(sid)
+    return {"ok": True, "applied": n}
+
 
 @app.on_event("startup")
 async def on_startup():
