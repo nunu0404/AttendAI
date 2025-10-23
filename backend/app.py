@@ -20,6 +20,9 @@ from typing import Optional
 # =========================
 # 환경/전역
 # =========================
+EXPORT_ROOT = os.path.join(os.path.dirname(__file__), "exports")
+os.makedirs(EXPORT_ROOT, exist_ok=True)
+
 QR_SECRET = os.getenv("QR_SECRET", "change-me")  # 운영에서는 환경변수로 지정
 JWT_ALG = "HS256"
 LATEST_QR_NONCE: dict[int, str] = {}            # 세션별 최신 QR nonce 저장
@@ -298,6 +301,127 @@ def checkin_page(t: str = Query(...)):
         )
     return HTMLResponse(html)
 
+@app.get("/api/export/session/{session_id}/anomaly.csv")
+async def api_export_anomaly_csv(session_id: int, min_score: int = 0):
+    """
+    현재 세션의 의심 행위 점수 계산 결과를 CSV로 다운로드.
+    min_score: 이 값 이하(<=)만 포함시키고 싶으면 지정 (예: 70)
+    """
+    conn = db()
+    cur = conn.cursor()
+
+    # 세션 존재 확인 + 시간 범위
+    cur.execute("SELECT start_time, end_time FROM sessions WHERE id=?", (session_id,))
+    srow = cur.fetchone()
+    if not srow:
+        conn.close()
+        raise HTTPException(status_code=404, detail="no session")
+    s_start = datetime.strptime(srow["start_time"], "%Y-%m-%d %H:%M:%S")
+    s_end = datetime.strptime(srow["end_time"], "%Y-%m-%d %H:%M:%S")
+
+    # 로그 가져오기 (device_name 포함 버전으로)
+    cur.execute("""
+        SELECT student_id, checked_at, ip, qr_generated_at, device_name
+        FROM attendance_logs
+        WHERE session_id=?
+        ORDER BY id ASC
+    """, (session_id,))
+    rows = cur.fetchall()
+    conn.close()
+
+    # ====== 아래는 기존 api_anomaly와 동일 로직 ======
+    ip_to_students = {}
+    device_to_students = {}
+    student_counts = {}
+    fast_flags = set()
+    dup_flags = set()
+    shared_ip_flags = set()
+    shared_device_flags = set()
+    out_of_window = set()
+    burst_flags = set()
+    seen = set()
+    prev_by_student = {}
+
+    for r in rows:
+        k = (r["student_id"], r["ip"], r["checked_at"])
+        student_counts[r["student_id"]] = student_counts.get(r["student_id"], 0) + 1
+
+        ip_to_students.setdefault(r["ip"], set()).add(r["student_id"])
+
+        dn = (r["device_name"] or "").strip()
+        if dn:
+            device_to_students.setdefault(dn, set()).add(r["student_id"])
+
+        ga = datetime.strptime(r["qr_generated_at"], "%Y-%m-%d %H:%M:%S")
+        ca = datetime.strptime(r["checked_at"], "%Y-%m-%d %H:%M:%S")
+
+        if (ca - ga).total_seconds() < 2:
+            fast_flags.add(r["student_id"])
+        if k in seen:
+            dup_flags.add(r["student_id"])
+        seen.add(k)
+
+        if ca < s_start or ca > s_end:
+            out_of_window.add(r["student_id"])
+
+        if r["student_id"] in prev_by_student:
+            prev = prev_by_student[r["student_id"]]
+            if (ca - prev).total_seconds() <= 5:
+                burst_flags.add(r["student_id"])
+        prev_by_student[r["student_id"]] = ca
+
+    for ip, sset in ip_to_students.items():
+        if len(sset) >= 3:
+            for s in sset:
+                shared_ip_flags.add(s)
+
+    for dn, sset in device_to_students.items():
+        if len(sset) >= 2:
+            for s in sset:
+                shared_device_flags.add(s)
+
+    scores = {}
+    for s in student_counts:
+        score = 100
+        if s in fast_flags: score -= 25
+        if s in dup_flags: score -= 20
+        if s in shared_ip_flags: score -= 40
+        if student_counts[s] >= 3: score -= 10
+        if s in out_of_window: score -= 15
+        if s in burst_flags: score -= 10
+        if s in shared_device_flags: score -= 50
+        if score < 0: score = 0
+        scores[s] = score
+
+    results = []
+    for s, sc in scores.items():
+        flags = []
+        if s in fast_flags: flags.append("fast")
+        if s in dup_flags: flags.append("dup")
+        if s in shared_ip_flags: flags.append("shared_ip")
+        if s in shared_device_flags: flags.append("shared_device")
+        if s in out_of_window: flags.append("out_of_window")
+        if s in burst_flags: flags.append("burst")
+        results.append((s, sc, "|".join(flags)))
+
+    # 점수 오름차순, 학번 정렬
+    results.sort(key=lambda x: (x[1], str(x[0])))
+
+    # 필터링(옵션)
+    if min_score > 0:
+        results = [r for r in results if r[1] <= min_score]
+
+    data = _csv_bytes(
+        rows=[["student_id","score","flags"]] + [[sid, score, flags] for (sid, score, flags) in results],
+        header=[],
+        encoding="cp949"
+    )
+    return Response(
+        content=data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="anomaly_{session_id}.csv"'}
+    )
+
 # =========================
 # 라우트: 세션/대시보드/내보내기 등
 # =========================
@@ -317,14 +441,39 @@ async def dashboard_page():
     return HTMLResponse(html)
 
 @app.post("/api/session/start")
-async def api_session_start(hours: int = Body(2)):
-    conn = db(); cur = conn.cursor()
+async def api_session_start(request: Request):
+    """
+    세션 시작: 바디가 없거나 형식이 엉켜도 안전하게 동작하도록 처리.
+    기본 2시간.
+    """
+    # 바디 안전 파싱
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+
+    try:
+        hours = int(payload.get("hours", 2) or 2)
+    except Exception:
+        hours = 2
+    if hours <= 0:
+        hours = 2
+
+    conn = db()
+    cur = conn.cursor()
     start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     end = (datetime.now() + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-    cur.execute("INSERT INTO sessions(class_id, start_time, end_time) VALUES(?,?,?)", ("CLS101", start, end))
+    cur.execute(
+        "INSERT INTO sessions(class_id, start_time, end_time) VALUES(?,?,?)",
+        ("CLS101", start, end)
+    )
     conn.commit()
     sid = cur.lastrowid
     conn.close()
+    # ▼ 새 세션 스냅샷(빈 파일 포함) 생성
+    snapshot_session_csvs(sid)
     return {"session_id": sid, "start_time": start, "end_time": end}
 
 @app.get("/api/session/current")
@@ -386,6 +535,7 @@ async def api_check_in(data: dict, request: Request):
     )
     conn.commit()
     conn.close()
+    snapshot_session_csvs(sid)
     return {"ok": True}
 
 # -------------------------
@@ -415,6 +565,74 @@ async def api_sessions(limit: int = 20):
     for r in rows:
         out.append({"id": r["id"], "class_id": r["class_id"], "start_time": r["start_time"], "end_time": r["end_time"]})
     return {"sessions": out}
+
+# --- 세션별 출석/공결 조회 API (대시보드가 사용) -----------------------------
+
+@app.get("/api/attendance/session/{session_id}/list")
+async def api_attendance_list(session_id: int):
+    """
+    세션별 출석 로그 목록.
+    세션이 없어도 200으로 빈 목록을 반환(대시보드 오류 방지).
+    """
+    conn = db(); cur = conn.cursor()
+    # 세션 존재 확인 (없어도 에러 대신 빈 목록)
+    cur.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,))
+    _ = cur.fetchone()
+
+    cur.execute(
+        "SELECT student_id, checked_at, ip, device_name "
+        "FROM attendance_logs WHERE session_id=? ORDER BY id ASC",
+        (session_id,)
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    logs = [
+        {
+            "student_id": r["student_id"],
+            "checked_at": r["checked_at"],
+            "ip": r["ip"],
+            "device_name": r["device_name"],
+        }
+        for r in rows
+    ]
+    return {"session_id": session_id, "logs": logs}
+
+
+@app.get("/api/excuses/session/{session_id}")
+async def api_excuses_session(session_id: int):
+    """
+    세션 날짜에 해당하는 공결(이메일) 내역.
+    세션이 없으면 빈 결과 반환.
+    """
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT start_time FROM sessions WHERE id=?", (session_id,))
+    srow = cur.fetchone()
+
+    # 세션 없으면 빈 값
+    if not srow:
+        conn.close()
+        return {"session_id": session_id, "session_date": None, "excuses": []}
+
+    session_date = srow["start_time"][:10]
+    cur.execute(
+        "SELECT student_id, excuse_type, evidence_ok, notes "
+        "FROM email_excuses WHERE session_date=? ORDER BY id ASC",
+        (session_date,)
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    excuses = [
+        {
+            "student_id": r["student_id"],
+            "excuse_type": r["excuse_type"],
+            "evidence_ok": bool(r["evidence_ok"]),
+            "notes": r["notes"] or "",
+        }
+        for r in rows
+    ]
+    return {"session_id": session_id, "session_date": session_date, "excuses": excuses}
 
 @app.get("/api/export/attendance/recent.csv")
 async def api_export_attendance_recent(days: int = 14):
@@ -641,6 +859,7 @@ async def api_excuses_apply(data: dict):
     if not sid:
         raise HTTPException(status_code=400, detail="no session")
     n = apply_excuses(sid)
+    snapshot_session_csvs(sid)
     return {"ok": True, "applied": n}
 
 # -------------------------
@@ -674,14 +893,200 @@ async def api_excuse_upsert(data: dict):
     if not student_id or not session_date or not excuse_type:
         raise HTTPException(status_code=400, detail="invalid payload")
     conn = db(); cur = conn.cursor()
-    cur.execute("SELECT id FROM email_excuses WHERE student_id=? AND session_date=?", (student_id, session_date))
-    row = cur.fetchone()
-    if row:
-        cur.execute("UPDATE email_excuses SET excuse_type=?, evidence_ok=?, notes=? WHERE id=?", (excuse_type, evidence_ok, notes, row["id"]))
-    else:
-        cur.execute("INSERT INTO email_excuses(student_id, session_date, excuse_type, evidence_ok, notes) VALUES(?,?,?,?,?)", (student_id, session_date, excuse_type, evidence_ok, notes))
-    conn.commit(); conn.close()
+    cur.execute("SELECT id FROM sessions WHERE date(start_time)=?", (session_date,))
+    sids = [r["id"] for r in cur.fetchall()]
+    conn.close()
+    for sid in sids:
+        snapshot_session_csvs(sid)
     return {"ok": True}
+
+# ====== [NEW] 의심 학생만 반환하는 엔드포인트 ======
+@app.get("/api/anomaly/session/{session_id}/suspects")
+async def api_anomaly_suspects(session_id: int):
+    """
+    점수 없이 '의심 사유'만 모아서 반환.
+    - 동일 IP 3명 이상
+    - 동일 기기(기기명) 2명 이상
+    - QR 생성 후 2초 내 초고속 접속
+    - 세션 시간 밖 접속
+    - 5초 이내 연속 접속
+    - 완전 동일 로그(중복)
+    """
+    conn = db()
+    cur = conn.cursor()
+
+    # 세션 시간
+    cur.execute("SELECT start_time, end_time FROM sessions WHERE id=?", (session_id,))
+    srow = cur.fetchone()
+    if not srow:
+        conn.close()
+        raise HTTPException(status_code=404, detail="no session")
+
+    s_start = datetime.strptime(srow["start_time"], "%Y-%m-%d %H:%M:%S")
+    s_end   = datetime.strptime(srow["end_time"], "%Y-%m-%d %H:%M:%S")
+
+    # 로그 수집 (기기명 포함)
+    cur.execute("""
+        SELECT student_id, checked_at, ip, qr_generated_at, device_name
+        FROM attendance_logs
+        WHERE session_id=?
+        ORDER BY id ASC
+    """, (session_id,))
+    rows = cur.fetchall()
+    conn.close()
+
+    ip_to_students = {}
+    device_to_students = {}
+    seen = set()
+    prev_by_student = {}
+
+    # 플래그 세트
+    fast_flags = set()           # QR 생성 2초 내 접속
+    dup_flags = set()            # 완전 동일 로그 중복
+    shared_ip_flags = set()      # 동일 IP 3명+
+    shared_device_flags = set()  # 동일 기기 2명+
+    out_of_window = set()        # 세션 시간 밖 접속
+    burst_flags = set()          # 5초 이내 연속 접속
+
+    for r in rows:
+        k = (r["student_id"], r["ip"], r["checked_at"])
+        ip_to_students.setdefault(r["ip"], set()).add(r["student_id"])
+
+        dn = (r["device_name"] or "").strip()
+        if dn:
+            device_to_students.setdefault(dn, set()).add(r["student_id"])
+
+        # 시간 파싱
+        ga = datetime.strptime(r["qr_generated_at"], "%Y-%m-%d %H:%M:%S")
+        ca = datetime.strptime(r["checked_at"], "%Y-%m-%d %H:%M:%S")
+
+        # 1) 너무 빠른 접속(봇/공유 가능성)
+        if (ca - ga).total_seconds() < 2:
+            fast_flags.add(r["student_id"])
+
+        # 2) 완전 동일 로그
+        if k in seen:
+            dup_flags.add(r["student_id"])
+        seen.add(k)
+
+        # 3) 세션 시간 바깥
+        if ca < s_start or ca > s_end:
+            out_of_window.add(r["student_id"])
+
+        # 4) 5초 이내 연속 접속(여러 장치/스크립트 시도)
+        sid = r["student_id"]
+        if sid in prev_by_student:
+            prev = prev_by_student[sid]
+            if (ca - prev).total_seconds() <= 5:
+                burst_flags.add(sid)
+        prev_by_student[sid] = ca
+
+    # 5) 동일 IP 3명 이상 사용
+    for ip, sset in ip_to_students.items():
+        if len(sset) >= 3:
+            for s in sset:
+                shared_ip_flags.add(s)
+
+    # 6) 동일 기기에서 2명 이상(기기명으로 클러스터링)
+    for dn, sset in device_to_students.items():
+        if len(sset) >= 2:
+            for s in sset:
+                shared_device_flags.add(s)
+
+    # 학생별 사유 모으기
+    reasons_map = {}
+    def add_reason(sid, msg):
+        reasons_map.setdefault(sid, set()).add(msg)
+
+    for s in fast_flags:
+        add_reason(s, "QR 생성 후 2초 내 접속")
+    for s in dup_flags:
+        add_reason(s, "중복 로그")
+    for s in shared_ip_flags:
+        add_reason(s, "동일 IP 다수(3명 이상)")
+    for s in shared_device_flags:
+        add_reason(s, "동일 기기 사용(2명 이상)")
+    for s in out_of_window:
+        add_reason(s, "세션 시간 외 접속")
+    for s in burst_flags:
+        add_reason(s, "5초 이내 반복 접속")
+
+    suspects = []
+    for sid, reasons in reasons_map.items():
+        suspects.append({
+            "student_id": sid,
+            "reasons": sorted(list(reasons))
+        })
+
+    # 정렬: 사유 개수 많은 순, 학번순
+    suspects.sort(key=lambda x: (-len(x["reasons"]), str(x["student_id"])))
+    return {"session_id": session_id, "suspects": suspects}
+
+# === [ADD] 현재 진행중인 세션을 바로 분석하는 엔드포인트 ===
+@app.get("/api/anomaly/current")
+async def api_anomaly_current():
+    sid = current_session_id()
+    if not sid:
+        raise HTTPException(status_code=404, detail="no active session")
+    # 이미 있는 함수 재사용
+    return await api_anomaly(session_id=sid)
+
+def _write_csv_utf8bom(header, rows, path):
+    """UTF-8 BOM으로 파일 저장(엑셀 호환)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
+        w.writerow(header)
+        for r in rows:
+            w.writerow(r)
+
+def _session_export_dir(session_id: int, session_date: str) -> str:
+    # 예: exports/session_15_2025-10-23
+    safe = f"session_{session_id}_{session_date}"
+    return os.path.join(EXPORT_ROOT, safe)
+
+def snapshot_session_csvs(session_id: int):
+    """세션별 스냅샷 CSV 두 개(출석/공결)를 exports/ 아래 갱신 저장."""
+    conn = db(); cur = conn.cursor()
+
+    # 세션 날짜 알아내기
+    cur.execute("SELECT start_time FROM sessions WHERE id=?", (session_id,))
+    srow = cur.fetchone()
+    if not srow:
+        conn.close()
+        return
+    session_date = srow["start_time"][:10]
+    outdir = _session_export_dir(session_id, session_date)
+
+    # 출석 로그 스냅샷
+    cur.execute("""
+        SELECT student_id, checked_at, ip, device_name, token, qr_generated_at, anomaly_flags
+        FROM attendance_logs
+        WHERE session_id=?
+        ORDER BY id ASC
+    """, (session_id,))
+    att_rows = cur.fetchall()
+    _write_csv_utf8bom(
+        ["student_id","checked_at","ip","device_name","token","qr_generated_at","anomaly_flags"],
+        [[r["student_id"], r["checked_at"], r["ip"] or "", r["device_name"] or "", r["token"] or "", r["qr_generated_at"] or "", r["anomaly_flags"] or ""] for r in att_rows],
+        os.path.join(outdir, "attendance.csv")
+    )
+
+    # 공결 스냅샷(세션 날짜 기준)
+    cur.execute("""
+        SELECT student_id, excuse_type, evidence_ok, notes
+        FROM email_excuses
+        WHERE session_date=?
+        ORDER BY id ASC
+    """, (session_date,))
+    exc_rows = cur.fetchall()
+    _write_csv_utf8bom(
+        ["session_date","student_id","excuse_type","evidence_ok","notes"],
+        [[session_date, r["student_id"], r["excuse_type"], int(r["evidence_ok"] or 0), _sanitize_notes(r["notes"])] for r in exc_rows],
+        os.path.join(outdir, "excuses.csv")
+    )
+
+    conn.close()
 
 # -------------------------
 # 메인
