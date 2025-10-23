@@ -1,22 +1,68 @@
 <!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AttendAI Check-in</title>
-<link rel="stylesheet" href="/static/styles.css">
-</head>
-<body>
-<div class="container">
-<h1>출석 체크</h1>
-<form id="f">
-<input type="text" id="student_id" placeholder="학번" required>
-<input type="hidden" id="session_id">
-<input type="hidden" id="token">
-<button type="submit">출석</button>
-</form>
-<div id="msg"></div>
+<meta charset="utf-8" />
+<title>출석 체크</title>
+<style>
+  body{font-family:system-ui;margin:24px}
+  .box{max-width:420px;margin:auto}
+  label{display:block;margin:.5rem 0 .25rem}
+  input{width:100%;padding:.6rem;border:1px solid #ddd;border-radius:8px}
+  button{margin-top:12px;padding:.7rem 1rem;border:0;border-radius:10px;background:#3b82f6;color:#fff;cursor:pointer}
+</style>
+
+<div class="box">
+  <h2>출석 체크</h2>
+
+  <!-- 서버가 checkin_page에서 주입 -->
+  <input type="hidden" id="sid" value="%%SID%%" />
+  <input type="hidden" id="form_token" value="%%TOKEN%%" />
+
+  <label>학번</label>
+  <input id="student_id" placeholder="예: 20241234" />
+
+  <label>기기 이름(선택)</label>
+  <input id="device_name" placeholder="예: iPhone / Galaxy" />
+
+  <button id="submitBtn">제출</button>
+
+  <p id="msg" style="margin-top:8px;color:#666"></p>
 </div>
-<script src="/static/checkin.js"></script>
-</body>
-</html>
+
+<script>
+  const sid   = document.getElementById('sid').value;          // ✅ 주입값 사용
+  const token = document.getElementById('form_token').value;   // ✅ 폼 토큰
+
+  document.getElementById('submitBtn').addEventListener('click', async () => {
+    const student_id = document.getElementById('student_id').value.trim();
+    const device_name = document.getElementById('device_name').value.trim();
+    const msg = document.getElementById('msg');
+
+    if (!student_id) {
+      msg.textContent = '학번을 입력하세요.';
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/attendance/check-in', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          session_id: Number(sid),   // ✅ 쿼리에서 읽지 않음
+          student_id,
+          token,                     // ✅ 폼 토큰 그대로 제출
+          device_name
+        })
+      });
+      const j = await res.json();
+      if (res.ok && j.ok) {
+        msg.style.color = '#16a34a';
+        msg.textContent = '출석이 처리되었습니다.';
+      } else {
+        msg.style.color = '#dc2626';
+        msg.textContent = '실패: ' + (j.detail || j.error || res.statusText);
+      }
+    } catch (e) {
+      msg.style.color = '#dc2626';
+      msg.textContent = '네트워크 오류';
+    }
+  });
+</script>
