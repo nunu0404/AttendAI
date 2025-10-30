@@ -3,6 +3,10 @@ uvicorn
 pydantic
 qrcode
 Pillow
+PyJWT
+python-fido2
+google-generativeai
+PyPDF2
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
