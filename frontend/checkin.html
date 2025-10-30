@@ -1,68 +1,219 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>출석 체크</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
-  body{font-family:system-ui;margin:24px}
-  .box{max-width:420px;margin:auto}
-  label{display:block;margin:.5rem 0 .25rem}
-  input{width:100%;padding:.6rem;border:1px solid #ddd;border-radius:8px}
-  button{margin-top:12px;padding:.7rem 1rem;border:0;border-radius:10px;background:#3b82f6;color:#fff;cursor:pointer}
+  :root { color-scheme: light dark; }
+  body{font-family:system-ui,apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px}
+  .box{max-width:520px;margin:auto}
+  h2{margin:0 0 16px}
+  label{display:block;margin:.6rem 0 .35rem}
+  input{width:100%;padding:.7rem;border:1px solid #d1d5db;border-radius:10px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  button{flex:1 1 auto;margin-top:12px;padding:.8rem 1rem;border:0;border-radius:12px;background:#3b82f6;color:#fff;cursor:pointer}
+  button.secondary{background:#374151}
+  button.success{background:#10b981}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .hint{font-size:.9rem;color:#6b7280;margin-top:6px}
+  #msg{margin-top:12px;white-space:pre-wrap}
+  .warn{color:#dc2626}
+  .ok{color:#16a34a}
 </style>
 
 <div class="box">
   <h2>출석 체크</h2>
 
-  <!-- 서버가 checkin_page에서 주입 -->
+  <!-- 서버가 /checkin 에서 주입 -->
   <input type="hidden" id="sid" value="%%SID%%" />
   <input type="hidden" id="form_token" value="%%TOKEN%%" />
 
   <label>학번</label>
-  <input id="student_id" placeholder="예: 20241234" />
+  <input id="student_id" placeholder="예: 202111179" autocomplete="username webauthn" />
 
   <label>기기 이름(선택)</label>
   <input id="device_name" placeholder="예: iPhone / Galaxy" />
 
-  <button id="submitBtn">제출</button>
+  <div class="row">
+    <button id="btnRegister" class="secondary" type="button">기기 등록(1회)</button>
+    <button id="btnAuth" class="secondary" type="button">생체 인증</button>
+    <button id="btnSubmit" class="success" type="button">출석</button>
+  </div>
 
-  <p id="msg" style="margin-top:8px;color:#666"></p>
+  <div id="webauthnInfo" class="hint"></div>
+  <div id="msg" class="hint"></div>
 </div>
 
 <script>
-  const sid   = document.getElementById('sid').value;          // ✅ 주입값 사용
-  const token = document.getElementById('form_token').value;   // ✅ 폼 토큰
+/* ===== util: base64url ===== */
+function toB64u(buf){
+  const b = Array.from(new Uint8Array(buf)).map(x => String.fromCharCode(x)).join('');
+  return btoa(b).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function b64uToBytes(s){
+  s = (s || '').replace(/-/g, '+').replace(/_/g, '/');
+  const pad = s.length % 4 ? '='.repeat(4 - (s.length % 4)) : '';
+  const bin = atob(s + pad);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr.buffer;
+}
 
-  document.getElementById('submitBtn').addEventListener('click', async () => {
-    const student_id = document.getElementById('student_id').value.trim();
-    const device_name = document.getElementById('device_name').value.trim();
-    const msg = document.getElementById('msg');
+/* ===== DOM ===== */
+const sid   = document.getElementById('sid').value;
+const token = document.getElementById('form_token').value;
+const $sid  = () => document.getElementById('student_id').value.trim();
+const $dev  = () => document.getElementById('device_name').value.trim();
+const $msg  = document.getElementById('msg');
+const $info = document.getElementById('webauthnInfo');
 
-    if (!student_id) {
-      msg.textContent = '학번을 입력하세요.';
-      return;
-    }
+const btnRegister = document.getElementById('btnRegister');
+const btnAuth     = document.getElementById('btnAuth');
+const btnSubmit   = document.getElementById('btnSubmit');
+btnSubmit.style.display = 'none';
 
-    try {
-      const res = await fetch('/api/attendance/check-in', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          session_id: Number(sid),   // ✅ 쿼리에서 읽지 않음
-          student_id,
-          token,                     // ✅ 폼 토큰 그대로 제출
-          device_name
-        })
-      });
-      const j = await res.json();
-      if (res.ok && j.ok) {
-        msg.style.color = '#16a34a';
-        msg.textContent = '출석이 처리되었습니다.';
-      } else {
-        msg.style.color = '#dc2626';
-        msg.textContent = '실패: ' + (j.detail || j.error || res.statusText);
-      }
-    } catch (e) {
-      msg.style.color = '#dc2626';
-      msg.textContent = '네트워크 오류';
-    }
+let authOK = false; // 최근 생체인증 성공 플래그(선택)
+
+/* ===== feature check ===== */
+(function featureCheck(){
+  const ua = navigator.userAgent || '';
+  const httpsOK = location.protocol === 'https:';
+  const credOK = !!(navigator.credentials && window.PublicKeyCredential);
+  $info.textContent = '';
+  if (!httpsOK) {
+    $info.innerHTML = '⚠️ 이 페이지는 HTTPS 환경에서만 생체인증이 동작합니다.';
+  }
+  if (!credOK) {
+    $info.innerHTML += ( $info.innerHTML ? '\n' : '' ) + '⚠️ 이 브라우저는 WebAuthn을 지원하지 않습니다.';
+  }
+})();
+
+/* ===== server helpers ===== */
+async function postJSON(url, body){
+  const r = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body||{})
   });
+  let data = null;
+  try { data = await r.json(); } catch {}
+  if (!r.ok) {
+    const err = (data && (data.detail || data.error)) || r.statusText;
+    throw new Error(err);
+  }
+  return data;
+}
+
+/* ===== WebAuthn: Registration ===== */
+async function registerDevice(){
+  $msg.className = 'hint'; $msg.textContent = '';
+  const student_id = $sid();
+  if (!student_id) { $msg.className='hint warn'; $msg.textContent='학번을 입력하세요.'; return; }
+
+  try{
+    btnRegister.disabled = true;
+
+    // 1) 서버에서 옵션 받기 (서버는 {"publicKey": {...}} 반환)
+    const { publicKey } = await postJSON('/webauthn/register/options', { student_id });
+
+    // 2) 필수 필드 b64url → ArrayBuffer
+    publicKey.challenge      = b64uToBytes(publicKey.challenge);
+    publicKey.user.id        = b64uToBytes(publicKey.user.id);
+    if (publicKey.excludeCredentials) {
+      publicKey.excludeCredentials = publicKey.excludeCredentials.map(ec => ({
+        ...ec,
+        id: b64uToBytes(ec.id)
+      }));
+    }
+
+    // 3) WebAuthn 등록
+    const cred = await navigator.credentials.create({ publicKey });
+
+    // 4) 서버에 완료 알림
+    const payload = {
+      student_id,
+      id:    toB64u(cred.rawId),
+      rawId: toB64u(cred.rawId),
+      type:  cred.type,
+      response:{
+        clientDataJSON:    toB64u(cred.response.clientDataJSON),
+        attestationObject: toB64u(cred.response.attestationObject)
+      }
+    };
+    const done = await postJSON('/webauthn/register/complete', payload);
+
+    $msg.className='hint ok';
+    $msg.textContent = '기기 등록 완료';
+  }catch(e){
+    $msg.className='hint warn';
+    $msg.textContent = '기기 등록 중 오류: ' + e.message;
+    console.error(e);
+  }finally{
+    btnRegister.disabled = false;
+  }
+}
+
+/* ===== WebAuthn: Authentication (선택) ===== */
+async function doAuth(){
+  $msg.className='hint'; $msg.textContent='';
+  const student_id = $sid();
+  if (!student_id) { $msg.className='hint warn'; $msg.textContent='학번을 입력하세요.'; return; }
+
+  try{
+    btnAuth.disabled = true;
+
+    // 1) 서버에서 인증 옵션 받기
+    const j = await postJSON('/webauthn/auth/options', { student_id });
+    const publicKey = j.publicKey || j; // 서버 구현에 따라
+
+    publicKey.challenge = b64uToBytes(publicKey.challenge);
+    if (publicKey.allowCredentials) {
+      publicKey.allowCredentials = publicKey.allowCredentials.map(a => ({
+        ...a, id: b64uToBytes(a.id)
+      }));
+    }
+
+    // 2) 브라우저 인증
+    const assn = await navigator.credentials.get({ publicKey });
+
+    // 3) 결과 서버로 전송
+    const payload = {
+      student_id,
+      session_id: Number(sid),
+      token,
+      device_name: $dev(),
+      id:   toB64u(assn.rawId),
+      rawId: toB64u(assn.rawId),
+      type: assn.type,
+      response: {
+        clientDataJSON: toB64u(assn.response.clientDataJSON),
+        authenticatorData: toB64u(assn.response.authenticatorData),
+        signature: toB64u(assn.response.signature),
+        userHandle: assn.response.userHandle ? toB64u(assn.response.userHandle) : null
+      }
+    };
+    const done = await postJSON('/webauthn/auth/complete', payload);
+
+    authOK = true;
+    $msg.className='hint ok';
+    $msg.textContent = '생체 인증 성공';
+  }catch(e){
+    authOK = false;
+    $msg.className='hint warn';
+    $msg.textContent = '생체 인증 실패: ' + e.message;
+    console.error(e);
+  }finally{
+    btnAuth.disabled = false;
+  }
+}
+
+/* ===== 출석 제출 ===== */
+async function submitAttendance(){
+  $msg.className='hint warn';
+  $msg.textContent = '생체 인증 완료 시 자동으로 출석이 처리됩니다.';
+}
+
+/* ===== bind ===== */
+btnRegister.addEventListener('click', registerDevice);
+btnAuth.addEventListener('click', doAuth);
+btnSubmit.addEventListener('click', submitAttendance);
 </script>

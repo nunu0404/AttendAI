@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>QR 출석 보드</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{font-family:system-ui;margin:16px;background:#f7f8ff}
+  .wrap{max-width:460px;margin:0 auto}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
+  .muted{color:#666;font-size:.9rem}
+  #qrBox{display:flex;justify-content:center;align-items:center;flex-direction:column;gap:10px}
+  #qrImg{width:320px;height:320px;object-fit:contain;border:1px dashed #cfd3ff;border-radius:12px;background:#fff}
+  .row{display:flex;justify-content:space-between;align-items:center}
+  .btn{background:#4a63e7;color:#fff;border:none;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row" style="margin-bottom:8px">
+    <div class="muted" id="title">QR 출석 보드</div>
+    <button class="btn" id="btnRefresh">재생성</button>
+  </div>
+  <div id="qrBox" class="card">
+    <div class="muted" id="qrMeta">준비중…</div>
+    <img id="qrImg" alt="qr">
+    <div class="muted">자동 갱신까지 <b id="qrCountdown">15</b>초</div>
+  </div>
+</div>
+
+<script>
+  function qp(k){ const u=new URL(window.location.href); return u.searchParams.get(k) }
+  const sid = parseInt(qp('session_id')||'0',10);
+  const qrImg = document.getElementById('qrImg');
+  const qrMeta = document.getElementById('qrMeta');
+  const qrCountdownEl = document.getElementById('qrCountdown');
+  const btnRefresh = document.getElementById('btnRefresh');
+  const DEFAULT_REFRESH = 15;
+  let tick=null;
+  let remain=DEFAULT_REFRESH;
+  let refreshSeconds=DEFAULT_REFRESH;
+
+  function setCountdown(val){
+    remain = Math.max(0, Math.round(val));
+    qrCountdownEl.textContent = remain;
+  }
+
+  async function updateQR(){
+    try{
+      const r = await fetch(`/api/qr/current?session_id=${sid}`);
+      if(!r.ok){ throw new Error(await r.text()); }
+      const j = await r.json();
+      refreshSeconds = Math.max(5, Math.round(Number(j.refresh_after ?? DEFAULT_REFRESH)));
+      const grace = Math.max(0, Math.round(Number(j.grace_seconds ?? 0)));
+      const expEpoch = Number(j.exp || 0);
+      const nowSec = Math.floor(Date.now()/1000);
+      const expiresIn = expEpoch ? Math.max(0, Math.round(expEpoch - nowSec)) : refreshSeconds + grace;
+
+      qrMeta.textContent = `세션 #${j.session_id} · 생성: ${j.generated_at} · 만료: ${j.valid_until}${grace ? ` (유예 ${grace}초)` : ''}`;
+      qrImg.src = `/api/qr/image?session_id=${sid}&_=${Date.now()}`;
+
+      const nextCountdown = Math.min(refreshSeconds, expiresIn || refreshSeconds);
+      setCountdown(nextCountdown);
+    }catch(e){
+      qrMeta.textContent = 'QR 생성 실패';
+      setCountdown(refreshSeconds);
+    }
+  }
+
+  function startLoop(){
+    if(tick) clearInterval(tick);
+    tick = setInterval(async ()=>{
+      if(remain <= 1){
+        await updateQR();
+      }else{
+        setCountdown(remain - 1);
+      }
+    }, 1000);
+  }
+
+  btnRefresh.addEventListener('click', async ()=>{ await updateQR(); });
+
+  (async ()=>{
+    if(!sid){ qrMeta.textContent='세션 ID가 없습니다.'; return; }
+    document.getElementById('title').textContent = `QR 출석 보드 · 세션 #${sid}`;
+    await updateQR();
+    startLoop();
+  })();
+</script>
+</body>
+</html>

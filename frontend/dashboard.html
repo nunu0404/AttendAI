@@ -32,11 +32,14 @@
     <select id="sessionSel" class="nowrap"></select>
 
     <button id="btnStart" class="btn">출석체크 시작</button>
-    <button id="btnStop" class="btn warn" style="display:none">출석체크 종료</button>
+    <button id="btnManual" class="btn">임의 출석 입력</button>
+    <button id="btnManualExcuse" class="btn">임의 공결 입력</button>
+    <button id="btnDelete" class="btn warn" style="display:none">세션 삭제</button>
 
     <button id="btnGmail" class="btn">Gmail 불러오기</button>
     <button id="btnCSV" class="btn">세션 출석 CSV</button>
-    <button id="btnCSVExcuse" class="btn">세션 공결 CSV</button>
+    <button id="btnCSVExcuse" class="btn">전체 공결 CSV</button>
+    <button id="btnCSVAll" class="btn">전체 출석 CSV</button>
     <button id="btnAnalyze" class="btn">분석하기</button>
 
     <span id="hint" class="muted right"></span>
@@ -54,7 +57,7 @@
       <div class="row-title">출석 로그</div>
       <table id="logsTbl">
         <thead>
-          <tr><th>학번</th><th>시각</th><th>기기</th><th>IP</th></tr>
+          <tr><th>학번</th><th>시각</th><th>기기</th><th>IP</th><th>비고</th><th>관리</th></tr>
         </thead>
         <tbody></tbody>
       </table>
@@ -64,10 +67,11 @@
       <div class="row-title">공결 내역</div>
       <table id="excuseTbl">
         <thead>
-          <tr><th>학번</th><th>사유</th><th>증빙</th><th>비고</th></tr>
+          <tr><th>날짜</th><th>학번</th><th>사유</th><th>증빙</th><th>비고</th><th>관리</th></tr>
         </thead>
         <tbody></tbody>
       </table>
+      <div id="excusePager" class="muted" style="margin-top:8px; display:flex; gap:8px; align-items:center;"></div>
 
       <div class="row-title">의심 내역</div>
       <table id="susTbl">

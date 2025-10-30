@@ -1,0 +1,5 @@
+﻿student_id,checked_at,ip,device_name,token,qr_generated_at,anomaly_flags
+202511001,2025-10-30 20:45:22,114.71.101.21,"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, li",Ag6tTSgqT4mtS3GXLnoK9IereqEpJzd1,2025-10-30 20:45:11,동일 기기 다수 사용
+202511002,2025-10-30 20:45:52,114.71.101.21,"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, li",kQWG1pGkcnvEscDxuLXO_Rn4Er37TXl3,2025-10-30 20:45:44,동일 기기 다수 사용
+202511003,2025-10-30 20:47:14,114.71.101.19,"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, li",B43P6ShA-9Nqx0QAsdJbiwNzdmYIrWHL,2025-10-30 20:47:00,동일 기기 다수 사용
+202511005,2025-10-30 20:56:24,192.168.137.1,Manual Entry,,2025-10-30 20:56:24,임의 출석; QR 생성 후 2초 내 접속
